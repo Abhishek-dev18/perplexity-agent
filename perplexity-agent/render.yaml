@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: perplexity-agent
-    env: docker
-    dockerfilePath: ./Dockerfile
-    plan: free   # or starter
-    autoDeploy: true

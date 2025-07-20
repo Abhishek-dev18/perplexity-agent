@@ -1,3 +1,0 @@
-fastapi
-uvicorn[standard]
-playwright==1.53.0          # fixed version → stability
