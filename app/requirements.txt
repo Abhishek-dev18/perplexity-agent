@@ -1,3 +1,4 @@
+playwright==1.53.0   # already fixed
+greenlet==3.0.3      # still OK for cp311
 fastapi
 uvicorn[standard]
-playwright==1.53.0          # fixed version → stability
