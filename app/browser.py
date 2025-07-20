@@ -1,9 +1,12 @@
 from playwright.sync_api import sync_playwright
+import urllib.parse
 import time
+import re
 
-def fetch_perplexity_answer(prompt: str, timeout: int = 30000) -> str:
+def fetch_perplexity_direct(prompt: str, timeout: int = 30000) -> str:
     """
-    Fetch answer from Perplexity using multiple selector strategies
+    Fetch answer from Perplexity using direct URL approach (bypassing search input)
+    This method is more reliable than trying to find and fill search elements
     """
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -19,111 +22,113 @@ def fetch_perplexity_answer(prompt: str, timeout: int = 30000) -> str:
         try:
             page = browser.new_page()
             
-            # Set longer timeout and user agent
+            # Set timeout and user agent
             page.set_default_timeout(timeout)
             page.set_extra_http_headers({
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             })
             
-            page.goto("https://www.perplexity.ai", wait_until="networkidle")
+            # Encode the prompt for URL
+            encoded_prompt = urllib.parse.quote(prompt)
+            search_url = f"https://www.perplexity.ai/search?q={encoded_prompt}"
             
-            # Wait a moment for dynamic content to load
-            time.sleep(2)
+            print(f"Navigating to: {search_url}")
             
-            # --- NEW search selector list (July 2025 optimized) -----------------
-            search_selectors = [
-                "textarea[placeholder*='Ask']",          # primary 2025-07-UI
-                "textarea[data-lexical-text='true']",    # lexical editor flag
-                "textarea[class*='resize-none']",        # CSS class fallback
-                "textarea",                              # generic fallback
-                "input[type='text']"                     # legacy fallback
-            ]
-            # --------------------------------------------------------------------
+            # Navigate directly to search results page
+            page.goto(search_url, wait_until="networkidle")
             
-            search_element = None
-            for selector in search_selectors:
-                try:
-                    search_element = page.wait_for_selector(selector, timeout=5000)
-                    if search_element:
-                        print(f"Found search element with selector: {selector}")
-                        break
-                except:
-                    continue
+            # Wait for AI response to generate (this is crucial)
+            print("Waiting for AI response to generate...")
+            time.sleep(8)  # Give AI time to generate the response
             
-            if not search_element:
-                raise Exception("Could not find search input element with any selector")
-            
-            # Fill the search input
-            search_element.fill(prompt)
-            
-            # Multiple ways to submit the search
-            try:
-                # Try pressing Enter
-                search_element.press("Enter")
-            except:
-                # Fallback: look for submit button
-                submit_selectors = [
-                    "button[type='submit']",
-                    "button:has-text('Search')",
-                    "button:has-text('Ask')", 
-                    "[data-testid*='submit']",
-                    ".submit-button"
-                ]
-                
-                for selector in submit_selectors:
-                    try:
-                        page.click(selector)
-                        break
-                    except:
-                        continue
-            
-            # --- NEW result selector list (July 2025 optimized) ----------------
+            # Try multiple strategies to extract the answer content
             result_selectors = [
-                "[data-testid*='answer']",
-                ".prose.text-pretty",            # new July-2025 container
-                ".answer-container",
-                "main article",
-                "div:has-text('.')"
+                # July 2025 updated selectors
+                ".prose.text-pretty",                    # Current answer container
+                "[data-testid*='answer']",              # Generic answer testid
+                ".answer-container",                     # Generic answer class
+                "main article",                          # Semantic HTML
+                "[role='main'] div:has-text('.')",      # Main content with text
+                "main div:has-text('.')"                # Fallback main content
             ]
-            # --------------------------------------------------------------------
             
-            result_element = None
+            answer_text = None
+            
             for selector in result_selectors:
                 try:
-                    result_element = page.wait_for_selector(selector, timeout=10000)
-                    if result_element and len(result_element.inner_text().strip()) > 50:
-                        print(f"Found result with selector: {selector}")
-                        break
+                    element = page.wait_for_selector(selector, timeout=5000)
+                    if element:
+                        text = element.inner_text().strip()
+                        if len(text) > 100:  # Ensure we have substantial content
+                            print(f"Found answer with selector: {selector}")
+                            answer_text = text
+                            break
                 except:
                     continue
             
-            if not result_element:
-                # Fallback: get all visible text from main content area
-                try:
-                    result_text = page.evaluate("""
-                        () => {
-                            const main = document.querySelector('main') || document.body;
-                            return main.innerText;
-                        }
-                    """)
-                    return result_text.strip()
-                except:
-                    raise Exception("Could not extract any results from the page")
+            # Fallback: Extract all visible text and clean it up
+            if not answer_text:
+                print("Using fallback content extraction...")
+                content = page.evaluate("""
+                    () => {
+                        // Remove navigation, headers, footers, ads
+                        const elementsToRemove = [
+                            'nav', 'header', 'footer', '.ad', '.ads', 
+                            '.navigation', '.menu', '[data-testid*="nav"]',
+                            'script', 'style', 'noscript'
+                        ];
+                        
+                        elementsToRemove.forEach(selector => {
+                            const elements = document.querySelectorAll(selector);
+                            elements.forEach(el => el.remove());
+                        });
+                        
+                        // Get main content area
+                        const main = document.querySelector('main') || 
+                                   document.querySelector('[role="main"]') || 
+                                   document.body;
+                        
+                        return main.innerText;
+                    }
+                """)
+                
+                # Clean up the extracted content
+                lines = content.split('\n')
+                relevant_lines = []
+                
+                for line in lines:
+                    line = line.strip()
+                    # Filter out navigation, UI elements, and very short lines
+                    if (len(line) > 20 and 
+                        not line.startswith(('Sign', 'Log', 'Try', 'Upgrade', 'Pro', 'Free')) and
+                        not re.match(r'^[A-Z][a-z]+$', line) and  # Single words
+                        not line.startswith('•') and
+                        'perplexity.ai' not in line.lower()):
+                        relevant_lines.append(line)
+                
+                # Take the most relevant content (usually the first substantial paragraphs)
+                answer_text = '\n\n'.join(relevant_lines[:10])  # First 10 relevant lines
             
-            answer = result_element.inner_text().strip()
+            if not answer_text or len(answer_text.strip()) < 50:
+                raise Exception("Could not extract meaningful content from the page")
             
-            if len(answer) < 10:
-                raise Exception("Retrieved answer is too short or empty")
-            
-            return answer
+            return answer_text.strip()
             
         finally:
             browser.close()
 
+def fetch_perplexity_answer(prompt: str, timeout: int = 30000) -> str:
+    """
+    Main function that uses the direct URL approach
+    This replaces the old selector-based method
+    """
+    return fetch_perplexity_direct(prompt, timeout)
+
 # Alternative simplified version for testing
 def fetch_perplexity_simple(prompt: str) -> str:
     """
-    Simplified version that just gets page content after search
+    Ultra-simple version that just gets page content after direct navigation
+    Use this if the main function has issues
     """
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -132,12 +137,11 @@ def fetch_perplexity_simple(prompt: str) -> str:
             page = browser.new_page()
             
             # Direct search URL approach
-            import urllib.parse
             encoded_prompt = urllib.parse.quote(prompt)
             search_url = f"https://www.perplexity.ai/search?q={encoded_prompt}"
             
             page.goto(search_url, wait_until="networkidle")
-            time.sleep(5)  # Wait for AI response
+            time.sleep(10)  # Wait longer for AI response
             
             # Get all visible text
             content = page.evaluate("() => document.body.innerText")
@@ -145,10 +149,10 @@ def fetch_perplexity_simple(prompt: str) -> str:
             # Basic cleanup to extract relevant content
             lines = content.split('\n')
             relevant_lines = [line.strip() for line in lines 
-                            if len(line.strip()) > 20 and 
-                            not line.strip().startswith(('Sign', 'Log', 'Try', 'Upgrade'))]
+                            if len(line.strip()) > 30 and 
+                            not line.strip().startswith(('Sign', 'Log', 'Try', 'Upgrade', 'Pro', 'Free'))]
             
-            return '\n'.join(relevant_lines[:10])  # Return first 10 relevant lines
+            return '\n'.join(relevant_lines[:8])  # Return first 8 relevant lines
             
         finally:
             browser.close()
